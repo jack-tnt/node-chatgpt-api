@@ -18,7 +18,7 @@ export default {
         // (Optional) Parameters as described in https://platform.openai.com/docs/api-reference/completions
         modelOptions: {
             // You can override the model name and any other parameters here.
-            // model: 'text-chat-davinci-002-20221122',
+            model: 'text-davinci-003',
             // Set max_tokens here to override the default max_tokens of 1000 for the completion.
             // max_tokens: 1000,
         },

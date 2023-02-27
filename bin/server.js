@@ -75,6 +75,10 @@ await server.register(cors, {
 
 server.post('/conversation', async (request, reply) => {
     const body = request.body || {};
+    const token = request.headers['token']
+    if (settings.token && settings.token !== token) {
+        return reply.code(403).send({ error: 'Invalid token.' });
+    }
 
     let onProgress;
     if (body.stream === true) {

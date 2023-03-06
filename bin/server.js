@@ -75,6 +75,14 @@ await server.register(cors, {
 
 server.post('/conversation', async (request, reply) => {
     const body = request.body || {};
+    const abortController = new AbortController();
+
+    reply.raw.on('close', () => {
+        if (abortController.signal.aborted === false) {
+            abortController.abort();
+        }
+    });
+
     const token = request.headers['token']
     if (settings.token && settings.token !== token) {
         return reply.code(403).send({ error: 'Invalid token.' });
@@ -87,7 +95,7 @@ server.post('/conversation', async (request, reply) => {
                 console.debug(token);
             }
             if (token !== '[DONE]') {
-                reply.sse({ id: '', data: token });
+                reply.sse({ id: '', data: JSON.stringify(token) });
             }
         };
     } else {
@@ -114,6 +122,7 @@ server.post('/conversation', async (request, reply) => {
             clientId: body.clientId,
             invocationId: body.invocationId,
             onProgress,
+            abortController,
         });
     } catch (e) {
         error = e;

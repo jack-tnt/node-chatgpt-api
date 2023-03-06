@@ -5,6 +5,12 @@ import Keyv from 'keyv';
 import { ProxyAgent } from 'undici';
 import HttpsProxyAgent from 'https-proxy-agent';
 
+/**
+ * https://stackoverflow.com/a/58326357
+ * @param {number} size
+ */
+const genRanHex = (size) => [...Array(size)].map(() => Math.floor(Math.random() * 16).toString(16)).join('');
+
 export default class BingAIClient {
     constructor(opts) {
         this.opts = {
@@ -115,11 +121,13 @@ export default class BingAIClient {
         opts = {},
     ) {
         let {
+            toneStyle = 'balanced', //or creative, precise
             conversationSignature,
             conversationId,
             clientId,
             invocationId = 0,
             onProgress,
+            abortController = new AbortController(),
         } = opts;
 
         if (typeof onProgress !== 'function') {
@@ -142,6 +150,16 @@ export default class BingAIClient {
         }
 
         const ws = await this.createWebSocketConnection();
+
+        let toneOption;
+        if (toneStyle === 'creative') {
+            toneOption = 'h3imaginative';
+        } else if (toneStyle === 'precise') {
+            toneOption = 'h3precise';
+        } else {
+            toneOption = 'harmonyv3';
+        }
+
         const obj = {
             arguments: [
                 {
@@ -149,11 +167,21 @@ export default class BingAIClient {
                     optionsSets: [
                         'nlu_direct_response_filter',
                         'deepleo',
-                        'enable_debug_commands',
                         'disable_emoji_spoken_text',
                         'responsible_ai_policy_235',
                         'enablemm',
+                        toneOption,
+                        'dtappid',
+                        'cricinfo',
+                        'cricinfov2',
+                        'dv3sugg'
                     ],
+                    sliceIds: [
+                        '222dtappid',
+                        '225cricinfo',
+                        '224locals0'
+                    ],
+                    traceId: genRanHex(32),
                     isStartOfSession: invocationId === 0,
                     message: {
                         author: 'user',
@@ -175,10 +203,19 @@ export default class BingAIClient {
 
         const messagePromise = new Promise((resolve, reject) => {
             let replySoFar = '';
+
             const messageTimeout = setTimeout(() => {
                 this.cleanupWebSocketConnection(ws);
                 reject(new Error('Timed out waiting for response. Try enabling debug mode to see more information.'))
-            }, 120 * 1000,);
+            }, 120 * 1000);
+
+            // abort the request if the abort controller is aborted
+            abortController.signal.addEventListener('abort', () => {
+                clearTimeout(messageTimeout);
+                this.cleanupWebSocketConnection(ws);
+                reject('Request aborted');
+            });
+
             ws.on('message', (data) => {
                 const objects = data.toString().split('');
                 const events = objects.map((object) => {

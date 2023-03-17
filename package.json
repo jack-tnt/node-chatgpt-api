@@ -1,6 +1,6 @@
 {
   "name": "@waylaidwanderer/chatgpt-api",
-  "version": "1.26.1",
+  "version": "1.30.1",
   "description": "A ChatGPT implementation using the official ChatGPT model via OpenAI's API.",
   "main": "index.js",
   "bin": {
@@ -8,7 +8,7 @@
     "chatgpt-cli": "bin/cli.js"
   },
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1",
+    "test": "npx eslint .",
     "start": "node bin/server.js",
     "server": "node bin/server.js",
     "cli": "node bin/cli.js"
@@ -55,5 +55,11 @@
     "ora": "^6.1.2",
     "undici": "^5.20.0",
     "ws": "^8.12.0"
+  },
+  "devDependencies": {
+    "@keyv/redis": "^2.5.6",
+    "eslint": "^8.35.0",
+    "eslint-config-airbnb-base": "^15.0.0",
+    "eslint-plugin-import": "^2.27.5"
   }
 }

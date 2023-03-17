@@ -1,11 +1,13 @@
 import './fetch-polyfill.js';
 import crypto from 'crypto';
 import Keyv from 'keyv';
-import { encoding_for_model, get_encoding } from '@dqbd/tiktoken';
+import { encoding_for_model as encodingForModel, get_encoding as getEncoding } from '@dqbd/tiktoken';
 import { fetchEventSource } from '@waylaidwanderer/fetch-event-source';
 import { Agent, ProxyAgent } from 'undici';
 
 const CHATGPT_MODEL = 'gpt-3.5-turbo';
+
+const tokenizersCache = {};
 
 export default class ChatGPTClient {
     constructor(
@@ -15,8 +17,34 @@ export default class ChatGPTClient {
     ) {
         this.apiKey = apiKey;
 
-        this.options = options;
-        const modelOptions = options.modelOptions || {};
+        cacheOptions.namespace = cacheOptions.namespace || 'chatgpt';
+        this.conversationsCache = new Keyv(cacheOptions);
+
+        this.setOptions(options);
+    }
+
+    setOptions(options) {
+        if (this.options && !this.options.replaceOptions) {
+            // nested options aren't spread properly, so we need to do this manually
+            this.options.modelOptions = {
+                ...this.options.modelOptions,
+                ...options.modelOptions,
+            };
+            delete options.modelOptions;
+            // now we can merge options
+            this.options = {
+                ...this.options,
+                ...options,
+            };
+        } else {
+            this.options = options;
+        }
+
+        if (this.options.openaiApiKey) {
+            this.apiKey = this.options.openaiApiKey;
+        }
+
+        const modelOptions = this.options.modelOptions || {};
         this.modelOptions = {
             ...modelOptions,
             // set some good defaults (check for undefined in some cases because they may be 0)
@@ -27,10 +55,10 @@ export default class ChatGPTClient {
             stop: modelOptions.stop,
         };
 
-        this.isChatGptModel = this.modelOptions.model.startsWith('gpt-3.5-turbo');
-        const isChatGptModel = this.isChatGptModel;
+        this.isChatGptModel = this.modelOptions.model.startsWith('gpt-');
+        const { isChatGptModel } = this;
         this.isUnofficialChatGptModel = this.modelOptions.model.startsWith('text-chat') || this.modelOptions.model.startsWith('text-davinci-002-render');
-        const isUnofficialChatGptModel = this.isUnofficialChatGptModel;
+        const { isUnofficialChatGptModel } = this;
 
         // Davinci models have a max context length of 4097 tokens.
         this.maxContextTokens = this.options.maxContextTokens || (isChatGptModel ? 4095 : 4097);
@@ -53,11 +81,11 @@ export default class ChatGPTClient {
             // without tripping the stop sequences, so I'm using "||>" instead.
             this.startToken = '||>';
             this.endToken = '';
-            this.gptEncoder = get_encoding('cl100k_base');
+            this.gptEncoder = this.constructor.getTokenizer('cl100k_base');
         } else if (isUnofficialChatGptModel) {
             this.startToken = '<|im_start|>';
             this.endToken = '<|im_end|>';
-            this.gptEncoder = encoding_for_model('text-davinci-003', {
+            this.gptEncoder = this.constructor.getTokenizer('text-davinci-003', true, {
                 '<|im_start|>': 100264,
                 '<|im_end|>': 100265,
             });
@@ -68,9 +96,9 @@ export default class ChatGPTClient {
             this.startToken = '||>';
             this.endToken = '';
             try {
-                this.gptEncoder = encoding_for_model(this.modelOptions.model);
+                this.gptEncoder = this.constructor.getTokenizer(this.modelOptions.model, true);
             } catch {
-                this.gptEncoder = encoding_for_model('text-davinci-003');
+                this.gptEncoder = this.constructor.getTokenizer('text-davinci-003', true);
             }
         }
 
@@ -92,8 +120,21 @@ export default class ChatGPTClient {
             this.completionsUrl = 'https://api.openai.com/v1/completions';
         }
 
-        cacheOptions.namespace = cacheOptions.namespace || 'chatgpt';
-        this.conversationsCache = new Keyv(cacheOptions);
+        return this;
+    }
+
+    static getTokenizer(encoding, isModelName = false, extendSpecialTokens = {}) {
+        if (tokenizersCache[encoding]) {
+            return tokenizersCache[encoding];
+        }
+        let tokenizer;
+        if (isModelName) {
+            tokenizer = encodingForModel(encoding, extendSpecialTokens);
+        } else {
+            tokenizer = getEncoding(encoding, extendSpecialTokens);
+        }
+        tokenizersCache[encoding] = tokenizer;
+        return tokenizer;
     }
 
     async getCompletion(input, onProgress, abortController = null) {
@@ -101,15 +142,13 @@ export default class ChatGPTClient {
             abortController = new AbortController();
         }
         const modelOptions = { ...this.modelOptions };
-        if (typeof onProgress === 'function') {
-            modelOptions.stream = true;
-        }
+        modelOptions.stream = typeof onProgress === 'function';
         if (this.isChatGptModel) {
             modelOptions.messages = input;
         } else {
             modelOptions.prompt = input;
         }
-        const debug = this.options.debug;
+        const { debug } = this.options;
         const url = this.completionsUrl;
         if (debug) {
             console.debug();
@@ -121,7 +160,6 @@ export default class ChatGPTClient {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json',
-                Authorization: `Bearer ${this.apiKey}`,
             },
             body: JSON.stringify(modelOptions),
             dispatcher: new Agent({
@@ -129,12 +167,16 @@ export default class ChatGPTClient {
                 headersTimeout: 0,
             }),
         };
+        if (this.apiKey) {
+            opts.headers.Authorization = `Bearer ${this.apiKey}`;
+        }
 
         if (this.options.proxy) {
             opts.dispatcher = new ProxyAgent(this.options.proxy);
         }
 
         if (modelOptions.stream) {
+            // eslint-disable-next-line no-async-promise-executor
             return new Promise(async (resolve, reject) => {
                 try {
                     let done = false;
@@ -220,20 +262,57 @@ export default class ChatGPTClient {
         return response.json();
     }
 
+    async generateTitle(userMessage, botMessage) {
+        const instructionsPayload = {
+            role: 'system',
+            content: `Write an extremely concise subtitle for this conversation with no more than a few words. All words should be capitalized. Exclude punctuation.
+
+||>Message:
+${userMessage.message}
+||>Response:
+${botMessage.message}
+
+||>Title:`,
+        };
+
+        const titleGenClientOptions = JSON.parse(JSON.stringify(this.options));
+        titleGenClientOptions.modelOptions = {
+            model: 'gpt-3.5-turbo',
+            temperature: 0,
+            presence_penalty: 0,
+            frequency_penalty: 0,
+        };
+        const titleGenClient = new ChatGPTClient(this.apiKey, titleGenClientOptions);
+        const result = await titleGenClient.getCompletion([instructionsPayload], null);
+        // remove any non-alphanumeric characters, replace multiple spaces with 1, and then trim
+        return result.choices[0].message.content
+            .replace(/[^a-zA-Z0-9' ]/g, '')
+            .replace(/\s+/g, ' ')
+            .trim();
+    }
+
     async sendMessage(
         message,
         opts = {},
     ) {
+        if (opts.clientOptions && typeof opts.clientOptions === 'object') {
+            this.setOptions(opts.clientOptions);
+        }
+
         const conversationId = opts.conversationId || crypto.randomUUID();
         const parentMessageId = opts.parentMessageId || crypto.randomUUID();
 
         let conversation = await this.conversationsCache.get(conversationId);
+        let isNewConversation = false;
         if (!conversation) {
             conversation = {
                 messages: [],
                 createdAt: Date.now(),
             };
+            isNewConversation = true;
         }
+
+        const shouldGenerateTitle = opts.shouldGenerateTitle && isNewConversation;
 
         const userMessage = {
             id: crypto.randomUUID(),
@@ -241,7 +320,6 @@ export default class ChatGPTClient {
             role: 'User',
             message,
         };
-
         conversation.messages.push(userMessage);
 
         let payload;
@@ -258,11 +336,11 @@ export default class ChatGPTClient {
         if (typeof opts.onProgress === 'function') {
             await this.getCompletion(
                 payload,
-                (message) => {
-                    if (message === '[DONE]') {
+                (progressMessage) => {
+                    if (progressMessage === '[DONE]') {
                         return;
                     }
-                    const token = this.isChatGptModel ? message.choices[0].delta.content : message.choices[0].text;
+                    const token = this.isChatGptModel ? progressMessage.choices[0].delta.content : progressMessage.choices[0].text;
                     // first event's delta content is always undefined
                     if (!token) {
                         return;
@@ -309,14 +387,22 @@ export default class ChatGPTClient {
         };
         conversation.messages.push(replyMessage);
 
-        await this.conversationsCache.set(conversationId, conversation);
-
-        return {
+        const returnData = {
             response: replyMessage.message,
             conversationId,
+            parentMessageId: replyMessage.parentMessageId,
             messageId: replyMessage.id,
             details: result || {},
         };
+
+        if (shouldGenerateTitle) {
+            conversation.title = await this.generateTitle(userMessage, replyMessage);
+            returnData.title = conversation.title;
+        }
+
+        await this.conversationsCache.set(conversationId, conversation);
+
+        return returnData;
     }
 
     async buildPrompt(messages, parentMessageId, isChatGptModel = false) {
@@ -335,7 +421,7 @@ export default class ChatGPTClient {
                 'en-us',
                 { year: 'numeric', month: 'long', day: 'numeric' },
             );
-            promptPrefix = `${this.startToken}Instructions:\nYou are ChatGPT, a large language model trained by OpenAI.\nCurrent date: ${currentDateString}${this.endToken}\n\n`
+            promptPrefix = `${this.startToken}Instructions:\nYou are ChatGPT, a large language model trained by OpenAI. Respond conversationally.\nCurrent date: ${currentDateString}${this.endToken}\n\n`;
         }
 
         const promptSuffix = `${this.startToken}${this.chatGptLabel}:\n`; // Prompt ChatGPT to respond.
@@ -392,7 +478,7 @@ export default class ChatGPTClient {
                 promptBody = newPromptBody;
                 currentTokenCount = newTokenCount;
                 // wait for next tick to avoid blocking the event loop
-                await new Promise((resolve) => setTimeout(resolve, 0));
+                await new Promise(resolve => setTimeout(resolve, 0));
                 return buildPromptBody();
             }
             return true;
@@ -457,7 +543,8 @@ export default class ChatGPTClient {
         const orderedMessages = [];
         let currentMessageId = parentMessageId;
         while (currentMessageId) {
-            const message = messages.find((m) => m.id === currentMessageId);
+            // eslint-disable-next-line no-loop-func
+            const message = messages.find(m => m.id === currentMessageId);
             if (!message) {
                 break;
             }

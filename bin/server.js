@@ -1,21 +1,16 @@
 #!/usr/bin/env node
 import fastify from 'fastify';
 import cors from '@fastify/cors';
-import { FastifySSEPlugin } from "@waylaidwanderer/fastify-sse-v2";
+import { FastifySSEPlugin } from '@waylaidwanderer/fastify-sse-v2';
 import fs from 'fs';
-import { pathToFileURL } from 'url'
+import { pathToFileURL } from 'url';
+import { KeyvFile } from 'keyv-file';
 import ChatGPTClient from '../src/ChatGPTClient.js';
 import ChatGPTBrowserClient from '../src/ChatGPTBrowserClient.js';
 import BingAIClient from '../src/BingAIClient.js';
-import { KeyvFile } from 'keyv-file';
 
-const arg = process.argv.find((arg) => arg.startsWith('--settings'));
-let path;
-if (arg) {
-    path = arg.split('=')[1];
-} else {
-    path = './settings.js';
-}
+const arg = process.argv.find(_arg => _arg.startsWith('--settings'));
+const path = arg?.split('=')[1] ?? './settings.js';
 
 let settings;
 if (fs.existsSync(path)) {
@@ -24,9 +19,9 @@ if (fs.existsSync(path)) {
     settings = (await import(pathToFileURL(fullPath).toString())).default;
 } else {
     if (arg) {
-        console.error(`Error: the file specified by the --settings parameter does not exist.`);
+        console.error('Error: the file specified by the --settings parameter does not exist.');
     } else {
-        console.error(`Error: the settings.js file does not exist.`);
+        console.error('Error: the settings.js file does not exist.');
     }
     process.exit(1);
 }
@@ -45,26 +40,7 @@ if (settings.storageFilePath && !settings.cacheOptions.store) {
 }
 
 const clientToUse = settings.apiOptions?.clientToUse || settings.clientToUse || 'chatgpt';
-
-let client;
-switch (clientToUse) {
-    case 'bing':
-        client = new BingAIClient(settings.bingAiClient);
-        break;
-    case 'chatgpt-browser':
-        client = new ChatGPTBrowserClient(
-            settings.chatGptBrowserClient,
-            settings.cacheOptions,
-        );
-        break;
-    default:
-        client = new ChatGPTClient(
-            settings.openaiApiKey,
-            settings.chatGptClient,
-            settings.cacheOptions,
-        );
-        break;
-}
+const perMessageClientOptionsWhitelist = settings.apiOptions?.perMessageClientOptionsWhitelist || null;
 
 const server = fastify();
 
@@ -114,13 +90,25 @@ server.post('/conversation', async (request, reply) => {
             // noinspection ExceptionCaughtLocallyJS
             throw invalidError;
         }
-        const parentMessageId = body.parentMessageId ? body.parentMessageId.toString() : undefined;
-        result = await client.sendMessage(body.message, {
+
+        let clientToUseForMessage = clientToUse;
+        const clientOptions = filterClientOptions(body.clientOptions, clientToUseForMessage);
+        if (clientOptions && clientOptions.clientToUse) {
+            clientToUseForMessage = clientOptions.clientToUse;
+            delete clientOptions.clientToUse;
+        }
+
+        const messageClient = getClient(clientToUseForMessage);
+
+        result = await messageClient.sendMessage(body.message, {
+            jailbreakConversationId: body.jailbreakConversationId,
             conversationId: body.conversationId ? body.conversationId.toString() : undefined,
-            parentMessageId,
+            parentMessageId: body.parentMessageId ? body.parentMessageId.toString() : undefined,
             conversationSignature: body.conversationSignature,
             clientId: body.clientId,
             invocationId: body.invocationId,
+            shouldGenerateTitle: settings.apiOptions?.generateTitles || false, // only used for ChatGPTClient
+            clientOptions,
             onProgress,
             abortController,
         });
@@ -165,7 +153,7 @@ server.post('/conversation', async (request, reply) => {
 
 server.listen({
     port: settings.apiOptions?.port || settings.port || 3000,
-    host: settings.apiOptions?.host || 'localhost'
+    host: settings.apiOptions?.host || 'localhost',
 }, (error) => {
     if (error) {
         console.error(error);
@@ -177,3 +165,79 @@ function nextTick() {
     return new Promise(resolve => setTimeout(resolve, 0));
 }
 
+function getClient(clientToUseForMessage) {
+    switch (clientToUseForMessage) {
+        case 'bing':
+            return new BingAIClient({ ...settings.bingAiClient, cache: settings.cacheOptions });
+        case 'chatgpt-browser':
+            return new ChatGPTBrowserClient(
+                settings.chatGptBrowserClient,
+                settings.cacheOptions,
+            );
+        case 'chatgpt':
+            return new ChatGPTClient(
+                settings.openaiApiKey || settings.chatGptClient.openaiApiKey,
+                settings.chatGptClient,
+                settings.cacheOptions,
+            );
+        default:
+            throw new Error(`Invalid clientToUse: ${clientToUseForMessage}`);
+    }
+}
+
+/**
+ * Filter objects to only include whitelisted properties set in
+ * `settings.js` > `apiOptions.perMessageClientOptionsWhitelist`.
+ * Returns original object if no whitelist is set.
+ * @param {*} inputOptions
+ * @param clientToUseForMessage
+ */
+function filterClientOptions(inputOptions, clientToUseForMessage) {
+    if (!inputOptions || !perMessageClientOptionsWhitelist) {
+        return null;
+    }
+
+    // If inputOptions.clientToUse is set and is in the whitelist, use it instead of the default
+    if (
+        perMessageClientOptionsWhitelist.validClientsToUse
+        && inputOptions.clientToUse
+        && perMessageClientOptionsWhitelist.validClientsToUse.includes(inputOptions.clientToUse)
+    ) {
+        clientToUseForMessage = inputOptions.clientToUse;
+    } else {
+        inputOptions.clientToUse = clientToUseForMessage;
+    }
+
+    const whitelist = perMessageClientOptionsWhitelist[clientToUseForMessage];
+    if (!whitelist) {
+        // No whitelist, return all options
+        return inputOptions;
+    }
+
+    const outputOptions = {
+        clientToUse: clientToUseForMessage,
+    };
+
+    for (const property of Object.keys(inputOptions)) {
+        const allowed = whitelist.includes(property);
+
+        if (!allowed && typeof inputOptions[property] === 'object') {
+            // Check for nested properties
+            for (const nestedProp of Object.keys(inputOptions[property])) {
+                const nestedAllowed = whitelist.includes(`${property}.${nestedProp}`);
+                if (nestedAllowed) {
+                    outputOptions[property] = outputOptions[property] || {};
+                    outputOptions[property][nestedProp] = inputOptions[property][nestedProp];
+                }
+            }
+            continue;
+        }
+
+        // Copy allowed properties to outputOptions
+        if (allowed) {
+            outputOptions[property] = inputOptions[property];
+        }
+    }
+
+    return outputOptions;
+}

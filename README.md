@@ -102,8 +102,9 @@ Discord user @pig#8932 has found a working `text-chat-davinci-002` model, `text-
          * [API Server](#api-server)
          * [CLI](#cli)
       * [Using a Reverse Proxy](#using-a-reverse-proxy)
-   * [Caveats](#caveats)
+   * [Projects](#projects)
    * [Web Client](#web-client)
+   * [Caveats](#caveats)
    * [Contributing](#contributing)
    * [License](#license)
 
@@ -120,6 +121,7 @@ Discord user @pig#8932 has found a working `text-chat-davinci-002` model, `text-
     - This is currently only configurable on a global level, but I plan to add support for per-conversation customization.
   - Retains support for models like `text-davinci-003`
 - `BingAIClient`: support for Bing's version of ChatGPT, powered by GPT-4.
+  - Includes a built-in jailbreak you can activate which enables unlimited chat messages per conversation, unlimited messages per day, and brings Sydney back. 😊 
 - `ChatGPTBrowserClient`: support for the official ChatGPT website, using a reverse proxy server for a Cloudflare bypass.
   - **There may be a high chance of your account being banned if you continue to automate chat.openai.com.** Continue doing so at your own risk.
 
@@ -173,14 +175,14 @@ This takes an optional `--settings=<path_to_settings.js>` parameter, or looks fo
 module.exports = {
     // Options for the Keyv cache, see https://www.npmjs.com/package/keyv.
     // This is used for storing conversations, and supports additional drivers (conversations are stored in memory by default).
-    // Only applies when using `ChatGPTClient`.
+    // Only necessary when using `ChatGPTClient`, or `BingAIClient` in jailbreak mode.
     cacheOptions: {},
-    // If set, `ChatGPTClient` will use `keyv-file` to store conversations to this JSON file instead of in memory.
+    // If set, `ChatGPTClient` and `BingAIClient` will use `keyv-file` to store conversations to this JSON file instead of in memory.
     // However, `cacheOptions.store` will override this if set
     storageFilePath: process.env.STORAGE_FILE_PATH || './cache.json',
-    // Your OpenAI API key (for `ChatGPTClient`)
-    openaiApiKey: process.env.OPENAI_API_KEY || '',
     chatGptClient: {
+        // Your OpenAI API key (for `ChatGPTClient`)
+        openaiApiKey: process.env.OPENAI_API_KEY || '',
         // (Optional) Support for a reverse proxy for the completions endpoint (private API server).
         // Warning: This will expose your `openaiApiKey` to a third party. Consider the risks before using this.
         // reverseProxyUrl: 'https://chatgpt.hato.ai/completions',
@@ -222,9 +224,9 @@ module.exports = {
         debug: false,
     },
     chatGptBrowserClient: {
-        // (Optional) Support for a reverse proxy for the completions endpoint (private API server).
+        // (Optional) Support for a reverse proxy for the conversation endpoint (private API server).
         // Warning: This will expose your access token to a third party. Consider the risks before using this.
-        reverseProxyUrl: 'https://chatgpt.duti.tech/api/conversation',
+        reverseProxyUrl: 'https://bypass.duti.tech/api/conversation',
         // Access token from https://chat.openai.com/api/auth/session
         accessToken: '',
         // Cookies from chat.openai.com (likely not required if using reverse proxy server).
@@ -240,8 +242,32 @@ module.exports = {
         host: process.env.API_HOST || 'localhost',
         // (Optional) Set to true to enable `console.debug()` logging
         debug: false,
-        // (Optional) Possible options: "chatgpt", "chatgpt-browser", "bing".
-        // clientToUse: 'bing',
+        // (Optional) Possible options: "chatgpt", "chatgpt-browser", "bing". (Default: "chatgpt")
+        clientToUse: 'chatgpt',
+        // (Optional) Generate titles for each conversation for clients that support it (only ChatGPTClient for now).
+        // This will be returned as a `title` property in the first response of the conversation.
+        generateTitles: false,
+        // (Optional) Set this to allow changing the client or client options in POST /conversation.
+        // To disable, set to `null`. 
+        perMessageClientOptionsWhitelist: {
+            // The ability to switch clients using `clientOptions.clientToUse` will be disabled if `validClientsToUse` is not set.
+            // To allow switching clients per message, you must set `validClientsToUse` to a non-empty array.
+            validClientsToUse: ['bing', 'chatgpt', 'chatgpt-browser'], // values from possible `clientToUse` options above
+            // The Object key, e.g. "chatgpt", is a value from `validClientsToUse`.
+            // If not set, ALL options will be ALLOWED to be changed. For example, `bing` is not defined in `perMessageClientOptionsWhitelist` above,
+            // so all options for `bingAiClient` will be allowed to be changed.
+            // If set, ONLY the options listed here will be allowed to be changed.
+            // In this example, each array element is a string representing a property in `chatGptClient` above.
+            chatgpt: [
+                'promptPrefix',
+                'userLabel',
+                'chatGptLabel',
+                // Setting `modelOptions.temperature` here will allow changing ONLY the temperature.
+                // Other options like `modelOptions.model` will not be allowed to be changed.
+                // If you want to allow changing all `modelOptions`, define `modelOptions` here instead of `modelOptions.temperature`.
+                'modelOptions.temperature',
+            ],
+        },
     },
     // Options for the CLI app
     cliOptions: {
@@ -261,12 +287,35 @@ Alternatively, you can install and run the package directly.
     - using `npm start` or `npm run server` (if not using Docker)
     - using `docker-compose up` (requires Docker)
 
+#### Endpoints
+<details>
+<summary><strong>POST /conversation</strong></summary>
+
+Start or continue a conversation.
+Optional parameters are only necessary for conversations that span multiple requests.
+
+| Field                     | Description                                                                                                                                                                                                                                                     |
+|---------------------------|-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| message                   | The message to be displayed to the user.                                                                                                                                                                                                                        |
+| conversationId            | (Optional) An ID for the conversation you want to continue.                                                                                                                                                                                                     |
+| jailbreakConversationId   | (Optional, for `BingAIClient` only) Set to `true` to start a conversation in jailbreak mode. After that, this should be the ID for the jailbreak conversation (given in the response as a parameter also named `jailbreakConversationId`).                      |
+| parentMessageId           | (Optional, for `ChatGPTClient`, and `BingAIClient` in jailbreak mode) The ID of the parent message (i.e. `response.messageId`) when continuing a conversation.                                                                                                  |
+| conversationSignature     | (Optional, for `BingAIClient` only) A signature for the conversation (given in the response as a parameter also named `conversationSignature`). Required when continuing a conversation unless in jailbreak mode.                                               |
+| clientId                  | (Optional, for `BingAIClient` only) The ID of the client. Required when continuing a conversation unless in jailbreak mode.                                                                                                                                     |
+| invocationId              | (Optional, for `BingAIClient` only) The ID of the invocation. Required when continuing a conversation unless in jailbreak mode.                                                                                                                                 |
+| clientOptions             | (Optional) An object containing options for the client.                                                                                                                                                                                                         |
+| clientOptions.clientToUse | (Optional) The client to use for this message. Possible values: `chatgpt`, `chatgpt-browser`, `bing`.                                                                                                                                                           |
+| clientOptions.*           | (Optional) Any valid options for the client. For example, for `ChatGPTClient`, you can set `clientOptions.openaiApiKey` to set an API key for this message only, or `clientOptions.promptPrefix` to give the AI custom instructions for this message only, etc. |
+
+To configure which options can be changed per message (default: all), see the comments for `perMessageClientOptionsWhitelist` in `settings.example.js`.  
+To allow changing clients, `perMessageClientOptionsWhitelist.validClientsToUse` must be set to a non-empty array as described in the example settings file.
+</details>
+
 #### Usage
 <details>
 <summary><strong>Method 1 (POST)</strong></summary>
 
-To start a conversation with ChatGPT, send a POST request to the server's `/conversation` endpoint with a JSON body in the following format.
-Optional parameters are only necessary for conversations that span multiple requests:
+To start a conversation with ChatGPT, send a POST request to the server's `/conversation` endpoint with a JSON body with parameters per **Endpoints** > **POST /conversation** above.
 ```JSON
 {
     "message": "Hello, how are you today?",
@@ -287,7 +336,7 @@ The server will return a JSON object containing ChatGPT's response:
     "conversationSignature": "your-conversation-signature (for `BingAIClient` only)",
     "clientId": "your-client-id (for `BingAIClient` only)",
     "invocationId": "your-invocation-id (for `BingAIClient` only - pass this new value back into subsequent requests as-is)",
-    "details": "additional details about the AI's response (for `BingAIClient` only)"
+    "details": "an object containing the raw response from the client"
 }
 ```
 
@@ -314,7 +363,7 @@ If there was an error sending the message to ChatGPT:
 You can set `"stream": true` in the request body to receive a stream of tokens as they are generated.
 
 ```js
-import { fetchEventSource } from '@waylaidwanderer/fetch-event-source';
+import { fetchEventSource } from '@waylaidwanderer/fetch-event-source'; // use `@microsoft/fetch-event-source` instead if in a browser environment
 
 const opts = {
     method: 'POST',
@@ -325,7 +374,8 @@ const opts = {
         "message": "Write a poem about cats.",
         "conversationId": "your-conversation-id (optional)",
         "parentMessageId": "your-parent-message-id (optional)",
-        "stream": true
+        "stream": true,
+        // Any other parameters per `Endpoints > POST /conversation` above
     }),
 };
 ```
@@ -344,7 +394,7 @@ Successful output:
 { data: ' you', event: '', id: '', retry: undefined }
 { data: ' today', event: '', id: '', retry: undefined }
 { data: '?', event: '', id: '', retry: undefined }
-{ data: '<result JSON here>', event: 'result', id: '', retry: undefined }
+{ data: '<result JSON here, see Method 1>', event: 'result', id: '', retry: undefined }
 { data: '[DONE]', event: '', id: '', retry: undefined }
 // Hello! How can I help you today?
 ```
@@ -406,7 +456,7 @@ Instructions are provided below.
     * **This is NOT the same thing as the _session token_.**
     * Automatically fetching or refreshing your ChatGPT access token is not currently supported by this library. Please handle this yourself for now.
 2. Set `reverseProxyUrl` to `https://chatgpt.hato.ai/completions` in `settings.js > chatGptClient` or `ChatGPTClient`'s options.
-3. Set the "OpenAI API key" parameter (e.g. `settings.openaiApiKey`) to the ChatGPT access token you got in step 1.
+3. Set the "OpenAI API key" parameter (e.g. `settings.chatGptClient.openaiApiKey`) to the ChatGPT access token you got in step 1.
 4. Set the `model` to `text-davinci-002-render`, `text-davinci-002-render-paid`, or `text-davinci-002-render-sha` depending on which ChatGPT models that your account has access to. Models **must** be a ChatGPT model name, not the underlying model name, and you cannot use a model that your account does not have access to.
     * You can check which ones you have access to by opening DevTools and going to the Network tab. Refresh the page and look at the response body for https://chat.openai.com/backend-api/models.
 
@@ -424,7 +474,7 @@ Instructions are provided below.
     * **This is NOT the same thing as the _session token_.**
     * Automatically fetching or refreshing your ChatGPT access token is not currently supported by this library. Please handle this yourself for now.
 2. Set `reverseProxyUrl` to `https://chatgpt.pawan.krd/api/completions` in `settings.js > chatGptClient` or `ChatGPTClient`'s options.
-3. Set the "OpenAI API key" parameter (e.g. `settings.openaiApiKey`) to the ChatGPT access token you got in step 1.
+3. Set the "OpenAI API key" parameter (e.g. `settings.chatGptClient.openaiApiKey`) to the ChatGPT access token you got in step 1.
 4. Set the `model` to `text-davinci-002-render`, `text-davinci-002-render-paid`, or `text-davinci-002-render-sha` depending on which ChatGPT models that your account has access to. Models **must** be a ChatGPT model name, not the underlying model name, and you cannot use a model that your account does not have access to.
     * You can check which ones you have access to by opening DevTools and going to the Network tab. Refresh the page and look at the response body for https://chat.openai.com/backend-api/models.
 
@@ -434,6 +484,18 @@ Instructions are provided below.
 </details>
 </details>
 
+## Projects
+🚀 A list of awesome projects using `@waylaidwanderer/chatgpt-api`:
+- [PandoraAI](https://github.com/waylaidwanderer/PandoraAI): my web chat client powered by node-chatgpt-api, allowing users to easily chat with multiple AI systems while also offering support for custom presets. With its seamless and convenient design, PandoraAI provides an engaging conversational AI experience.
+- [ChatGPT Clone](https://github.com/danny-avila/chatgpt-clone): a clone of ChatGPT, uses official model, reverse-engineered UI, with AI model switching, message search, and prompt templates.
+- [ChatGPT WebApp](https://github.com/frontend-engineering/chatgpt-webapp-fullstack): a fullstack chat webapp with mobile compatble UI interface, and node-chatgpt-api works as backend. Anyone can deploy your own chat service.
+- [halbot](https://github.com/Leask/halbot): Just another ChatGPT/Bing Chat Telegram bot, which is simple design, easy to use, extendable and fun.
+
+Add yours to the list by [editing this README](https://github.com/waylaidwanderer/node-chatgpt-api/edit/main/README.md) and creating a pull request!
+
+## Web Client
+A web client for this project is also available at [waylaidwanderer/PandoraAI](https://github.com/waylaidwanderer/PandoraAI).
+
 ## Caveats
 ### Regarding `ChatGPTClient`
 Since `gpt-3.5-turbo` is ChatGPT's underlying model, I had to do my best to replicate the way the official ChatGPT website uses it.
@@ -441,10 +503,7 @@ This means my implementation or the underlying model may not behave exactly the 
 - Conversations are not tied to any user IDs, so if that's important to you, you should implement your own user ID system.
 - ChatGPT's model parameters (temperature, frequency penalty, etc.) are unknown, so I set some defaults that I thought would be reasonable.
 - Conversations are limited to roughly the last 3000 tokens, so earlier messages may be forgotten during longer conversations.
-  - This works in a similar way to ChatGPT, except I'm pretty sure they have some additional way of retrieving context from earlier messages when needed (which can probably be achieved with embeddings, but I consider that out-of-scope for now).
-
-## Web Client
-A web client is available for this library's API server is also available at [waylaidwanderer/chatgpt-web-client](https://github.com/waylaidwanderer/chatgpt-web-client).
+    - This works in a similar way to ChatGPT, except I'm pretty sure they have some additional way of retrieving context from earlier messages when needed (which can probably be achieved with embeddings, but I consider that out-of-scope for now).
 
 ## Contributing
 If you'd like to contribute to this project, please create a pull request with a detailed description of your changes.
